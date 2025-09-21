@@ -18,7 +18,7 @@ typedef struct {
   int count;
 } ht_hash_table;
 
-ht_hash_table *ht_new_hash_table();
+ht_hash_table *ht_new_hash_table(int n);
 void ht_hash_table_clear(ht_hash_table *ht);
 void ht_hash_table_destroy(ht_hash_table *ht);
 

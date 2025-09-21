@@ -1,8 +1,15 @@
 #include "hash_table.h"
 #include "util.h"
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define HT_MIN_LEN 16
+#define HT_LOAD_GROW 0.75
+#define HT_LOAD_SHRINK 0.15
+
+#define INITIAL_BUCKET_CAPACITY 4
 
 static void ht_entry_clear(ht_entry *e) {
   if (!e)
@@ -46,7 +53,7 @@ static ht_bucket *ht_get_or_create_bucket(ht_hash_table *ht, int bidx) {
   }
 
   (*ref)->size = 0;
-  (*ref)->capacity = 4;
+  (*ref)->capacity = INITIAL_BUCKET_CAPACITY;
   (*ref)->data = calloc(((*ref)->capacity), sizeof(ht_entry));
 
   if (!(*ref)->data) {
@@ -127,12 +134,20 @@ static int ht_get_hash(ht_hash_table *ht, const unsigned char *s) {
 
 // hash table API
 
-ht_hash_table *ht_new_hash_table() {
+ht_hash_table *ht_new_hash_table(int n) {
+  if (n < 0)
+    return NULL;
+
+  // If passed 0, or really anything <= HT_MIN_LEN
+  // defaults to HT_MIN_LEN
+  if (n <= HT_MIN_LEN)
+    n = HT_MIN_LEN;
+
   ht_hash_table *ht = malloc(sizeof(ht_hash_table));
   if (!ht)
     return NULL;
 
-  ht->len = 16;
+  ht->len = n;
   ht->count = 0;
   ht->buckets = calloc(ht->len, sizeof(ht_bucket *));
 
@@ -171,9 +186,107 @@ void ht_hash_table_destroy(ht_hash_table *ht) {
   free(ht);
 }
 
+static bool ht_resize_table(ht_hash_table *ht, int new_len) {
+  // want to fail if new_len < ht_min_len
+  if (!ht || new_len < HT_MIN_LEN)
+    return false;
+
+  // sanity check
+  if (ht->len == new_len)
+    return true;
+
+  ht_bucket **new_buckets = calloc(new_len, sizeof(ht_bucket *));
+  if (!new_buckets)
+    return false;
+
+  for (int i = 0; i < ht->len; i++) {
+    ht_bucket *b = ht->buckets[i];
+    if (!b)
+      continue;
+
+    for (int j = 0; j < b->size; j++) {
+      ht_entry e = b->data[j];
+
+      int nbidx = ht_hash((const unsigned char *)e.k) % new_len;
+      ht_bucket *nb = new_buckets[nbidx];
+      if (!nb) {
+        nb = malloc(sizeof(ht_bucket));
+        if (!nb) {
+          goto fail;
+        }
+        nb->size = 0;
+        nb->capacity = INITIAL_BUCKET_CAPACITY;
+        nb->data = calloc(nb->capacity, sizeof(ht_entry));
+        if (!nb->data) {
+          // big bug, free nb here because haven't set it to buckets yet!
+          free(nb);
+          goto fail;
+        }
+        new_buckets[nbidx] = nb;
+      }
+
+      if (nb->size == nb->capacity) {
+        int new_cap = nb->capacity * 2;
+        ht_entry *tmp = realloc(nb->data, new_cap * sizeof(ht_entry));
+        if (!tmp) {
+          goto fail;
+        }
+        nb->data = tmp;
+        nb->capacity = new_cap;
+      }
+
+      // moving ptrs here by copying content of e
+      nb->data[nb->size] = e;
+      nb->size++;
+    }
+  }
+
+  ht_bucket **old_buckets = ht->buckets;
+  int old_len = ht->len;
+
+  ht->buckets = new_buckets;
+  ht->len = new_len;
+
+  // After all buckets are "copied over"
+  // Free old stuff
+  for (int i = 0; i < old_len; i++) {
+    ht_bucket *b = old_buckets[i];
+    if (!b)
+      continue;
+
+    free(b->data);
+    free(b);
+  }
+  free(old_buckets);
+  return true;
+
+fail:
+  // if something fails free new bucket memory
+  for (int i = 0; i < new_len; i++) {
+    ht_bucket *nb = new_buckets[i];
+    if (!nb)
+      continue;
+
+    free(nb->data);
+    free(nb);
+  }
+
+  free(new_buckets);
+  return false;
+}
+
 void ht_insert(ht_hash_table *ht, const char *k, const char *v) {
   if (!ht || !k || !v)
     return;
+
+  // calculate load factor and resize if needed
+  if (((double)(ht->count + 1) / (double)ht->len) > HT_LOAD_GROW) {
+    if (!ht_resize_table(ht, ht->len * 2)) {
+      fprintf(
+          stderr,
+          "Warning: Growing hash table failed, reusing same size hash table\n");
+    }
+  }
 
   int bidx = ht_get_hash(ht, (const unsigned char *)k);
 
@@ -224,6 +337,21 @@ void ht_erase(ht_hash_table *ht, const char *k) {
     free(b->data);
     free(ht->buckets[bidx]);
     ht->buckets[bidx] = NULL;
+  }
+
+  // calculate load factor and resize if needed
+  // might have to be a little more conservative about shrinking
+
+  if (((double)ht->count / (double)ht->len) < HT_LOAD_SHRINK) {
+    int new_len = ht->len / 2;
+
+    if (new_len < HT_MIN_LEN)
+      new_len = HT_MIN_LEN;
+
+    if (!ht_resize_table(ht, new_len)) {
+      fprintf(stderr, "Warning: Shrinking hash table failed, reusing same size "
+                      "hash table\n");
+    }
   }
 }
 
