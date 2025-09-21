@@ -1,3 +1,3 @@
 # Hash Table in C
 
-C is the best. Embrace C. Here is a hash table.
+C is good. Embrace C. Here is a hash table.
